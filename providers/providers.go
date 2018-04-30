@@ -7,6 +7,7 @@ import (
 type Provider interface {
 	Data() *ProviderData
 	GetEmailAddress(*SessionState) (string, error)
+	GetUserName(*SessionState) (string, error)
 	Redeem(string, string) (*SessionState, error)
 	ValidateGroup(string) bool
 	ValidateSessionState(*SessionState) bool
@@ -32,6 +33,8 @@ func New(provider string, p *ProviderData) Provider {
 		return NewGitLabProvider(p)
 	case "wso2":
 		return NewWso2Provider(p)
+	case "oidc":
+		return NewOIDCProvider(p)
 	default:
 		return NewGoogleProvider(p)
 	}
