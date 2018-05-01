@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto"
 	"crypto/tls"
 	"encoding/base64"
@@ -13,9 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/18F/hmacauth"
 	"github.com/bitly/oauth2_proxy/providers"
-	oidc "github.com/coreos/go-oidc"
-	"github.com/mbland/hmacauth"
 )
 
 // Configuration Options that can be set by Command Line Flag, or Config File
@@ -30,6 +28,7 @@ type Options struct {
 	TLSKeyFile   string `flag:"tls-key" cfg:"tls_key_file"`
 
 	AuthenticatedEmailsFile  string   `flag:"authenticated-emails-file" cfg:"authenticated_emails_file"`
+	KeycloakGroup            string   `flag:"keycloak-group" cfg:"keycloak_group"`
 	AzureTenant              string   `flag:"azure-tenant" cfg:"azure_tenant"`
 	EmailDomains             []string `flag:"email-domain" cfg:"email_domains"`
 	GitHubOrg                string   `flag:"github-org" cfg:"github_org"`
@@ -60,12 +59,10 @@ type Options struct {
 	PassUserHeaders       bool     `flag:"pass-user-headers" cfg:"pass_user_headers"`
 	SSLInsecureSkipVerify bool     `flag:"ssl-insecure-skip-verify" cfg:"ssl_insecure_skip_verify"`
 	SetXAuthRequest       bool     `flag:"set-xauthrequest" cfg:"set_xauthrequest"`
-	SkipAuthPreflight     bool     `flag:"skip-auth-preflight" cfg:"skip_auth_preflight"`
 
 	// These options allow for other providers besides Google, with
 	// potential overrides.
 	Provider          string `flag:"provider" cfg:"provider"`
-	OIDCIssuerURL     string `flag:"oidc-issuer-url" cfg:"oidc_issuer_url"`
 	LoginURL          string `flag:"login-url" cfg:"login_url"`
 	RedeemURL         string `flag:"redeem-url" cfg:"redeem_url"`
 	ProfileURL        string `flag:"profile-url" cfg:"profile_url"`
@@ -74,8 +71,7 @@ type Options struct {
 	Scope             string `flag:"scope" cfg:"scope"`
 	ApprovalPrompt    string `flag:"approval-prompt" cfg:"approval_prompt"`
 
-	RequestLogging       bool   `flag:"request-logging" cfg:"request_logging"`
-	RequestLoggingFormat string `flag:"request-logging-format" cfg:"request_logging_format"`
+	RequestLogging bool `flag:"request-logging" cfg:"request_logging"`
 
 	SignatureKey string `flag:"signature-key" cfg:"signature_key" env:"OAUTH2_PROXY_SIGNATURE_KEY"`
 
@@ -85,7 +81,6 @@ type Options struct {
 	CompiledRegex []*regexp.Regexp
 	provider      providers.Provider
 	signatureData *SignatureData
-	oidcVerifier  *oidc.IDTokenVerifier
 }
 
 type SignatureData struct {
@@ -95,24 +90,22 @@ type SignatureData struct {
 
 func NewOptions() *Options {
 	return &Options{
-		ProxyPrefix:          "/oauth2",
-		HttpAddress:          "127.0.0.1:4180",
-		HttpsAddress:         ":443",
-		DisplayHtpasswdForm:  true,
-		CookieName:           "_oauth2_proxy",
-		CookieSecure:         true,
-		CookieHttpOnly:       true,
-		CookieExpire:         time.Duration(168) * time.Hour,
-		CookieRefresh:        time.Duration(0),
-		SetXAuthRequest:      false,
-		SkipAuthPreflight:    false,
-		PassBasicAuth:        true,
-		PassUserHeaders:      true,
-		PassAccessToken:      false,
-		PassHostHeader:       true,
-		ApprovalPrompt:       "force",
-		RequestLogging:       true,
-		RequestLoggingFormat: defaultRequestLoggingFormat,
+		ProxyPrefix:         "/oauth2",
+		HttpAddress:         "127.0.0.1:4180",
+		HttpsAddress:        ":443",
+		DisplayHtpasswdForm: true,
+		CookieName:          "_oauth2_proxy",
+		CookieSecure:        true,
+		CookieHttpOnly:      true,
+		CookieExpire:        time.Duration(168) * time.Hour,
+		CookieRefresh:       time.Duration(0),
+		SetXAuthRequest:     false,
+		PassBasicAuth:       true,
+		PassUserHeaders:     true,
+		PassAccessToken:     false,
+		PassHostHeader:      true,
+		ApprovalPrompt:      "force",
+		RequestLogging:      true,
 	}
 }
 
@@ -126,15 +119,10 @@ func parseURL(to_parse string, urltype string, msgs []string) (*url.URL, []strin
 }
 
 func (o *Options) Validate() error {
-	if o.SSLInsecureSkipVerify {
-		// TODO: Accept a certificate bundle.
-		insecureTransport := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
-		http.DefaultClient = &http.Client{Transport: insecureTransport}
-	}
-
 	msgs := make([]string, 0)
+	if len(o.Upstreams) < 1 {
+		msgs = append(msgs, "missing setting: upstream")
+	}
 	if o.CookieSecret == "" {
 		msgs = append(msgs, "missing setting: cookie-secret")
 	}
@@ -145,24 +133,7 @@ func (o *Options) Validate() error {
 		msgs = append(msgs, "missing setting: client-secret")
 	}
 	if o.AuthenticatedEmailsFile == "" && len(o.EmailDomains) == 0 && o.HtpasswdFile == "" {
-		msgs = append(msgs, "missing setting for email validation: email-domain or authenticated-emails-file required."+
-			"\n      use email-domain=* to authorize all email addresses")
-	}
-
-	if o.OIDCIssuerURL != "" {
-		// Configure discoverable provider data.
-		provider, err := oidc.NewProvider(context.Background(), o.OIDCIssuerURL)
-		if err != nil {
-			return err
-		}
-		o.oidcVerifier = provider.Verifier(&oidc.Config{
-			ClientID: o.ClientID,
-		})
-		o.LoginURL = provider.Endpoint().AuthURL
-		o.RedeemURL = provider.Endpoint().TokenURL
-		if o.Scope == "" {
-			o.Scope = "openid email profile"
-		}
+		msgs = append(msgs, "missing setting for email validation: email-domain or authenticated-emails-file required.\n      use email-domain=* to authorize all email addresses")
 	}
 
 	o.redirectURL, msgs = parseURL(o.RedirectURL, "redirect", msgs)
@@ -170,20 +141,21 @@ func (o *Options) Validate() error {
 	for _, u := range o.Upstreams {
 		upstreamURL, err := url.Parse(u)
 		if err != nil {
-			msgs = append(msgs, fmt.Sprintf("error parsing upstream: %s", err))
-		} else {
-			if upstreamURL.Path == "" {
-				upstreamURL.Path = "/"
-			}
-			o.proxyURLs = append(o.proxyURLs, upstreamURL)
+			msgs = append(msgs, fmt.Sprintf(
+				"error parsing upstream=%q %s",
+				upstreamURL, err))
 		}
+		if upstreamURL.Path == "" {
+			upstreamURL.Path = "/"
+		}
+		o.proxyURLs = append(o.proxyURLs, upstreamURL)
 	}
 
 	for _, u := range o.SkipAuthRegex {
 		CompiledRegex, err := regexp.Compile(u)
 		if err != nil {
-			msgs = append(msgs, fmt.Sprintf("error compiling regex=%q %s", u, err))
-			continue
+			msgs = append(msgs, fmt.Sprintf(
+				"error compiling regex=%q %s", u, err))
 		}
 		o.CompiledRegex = append(o.CompiledRegex, CompiledRegex)
 	}
@@ -237,6 +209,13 @@ func (o *Options) Validate() error {
 	msgs = parseSignatureKey(o, msgs)
 	msgs = validateCookieName(o, msgs)
 
+	if o.SSLInsecureSkipVerify {
+		insecureTransport := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+		http.DefaultClient = &http.Client{Transport: insecureTransport}
+	}
+
 	if len(msgs) != 0 {
 		return fmt.Errorf("Invalid configuration:\n  %s",
 			strings.Join(msgs, "\n  "))
@@ -263,6 +242,8 @@ func parseProviderInfo(o *Options, msgs []string) []string {
 		p.Configure(o.AzureTenant)
 	case *providers.GitHubProvider:
 		p.SetOrgTeam(o.GitHubOrg, o.GitHubTeam)
+	case *providers.KeycloakProvider:
+		p.SetGroup(o.KeycloakGroup)
 	case *providers.GoogleProvider:
 		if o.GoogleServiceAccountJSON != "" {
 			file, err := os.Open(o.GoogleServiceAccountJSON)
@@ -271,12 +252,6 @@ func parseProviderInfo(o *Options, msgs []string) []string {
 			} else {
 				p.SetGroupRestriction(o.GoogleGroups, o.GoogleAdminEmail, file)
 			}
-		}
-	case *providers.OIDCProvider:
-		if o.oidcVerifier == nil {
-			msgs = append(msgs, "oidc provider requires an oidc issuer URL")
-		} else {
-			p.Verifier = o.oidcVerifier
 		}
 	}
 	return msgs

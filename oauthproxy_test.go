@@ -3,6 +3,9 @@ package main
 import (
 	"crypto"
 	"encoding/base64"
+	"github.com/18F/hmacauth"
+	"github.com/bitly/oauth2_proxy/providers"
+	"github.com/bmizerany/assert"
 	"io"
 	"io/ioutil"
 	"log"
@@ -14,10 +17,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/bitly/oauth2_proxy/providers"
-	"github.com/mbland/hmacauth"
-	"github.com/stretchr/testify/assert"
 )
 
 func init() {
@@ -360,30 +359,26 @@ func TestDoNotForwardAccessTokenUpstream(t *testing.T) {
 }
 
 type SignInPageTest struct {
-	opts                    *Options
-	proxy                   *OAuthProxy
-	sign_in_regexp          *regexp.Regexp
-	sign_in_provider_regexp *regexp.Regexp
+	opts           *Options
+	proxy          *OAuthProxy
+	sign_in_regexp *regexp.Regexp
 }
 
 const signInRedirectPattern = `<input type="hidden" name="rd" value="(.*)">`
-const signInSkipProvider = `>Found<`
 
-func NewSignInPageTest(skipProvider bool) *SignInPageTest {
+func NewSignInPageTest() *SignInPageTest {
 	var sip_test SignInPageTest
 
 	sip_test.opts = NewOptions()
 	sip_test.opts.CookieSecret = "foobar"
 	sip_test.opts.ClientID = "bazquux"
 	sip_test.opts.ClientSecret = "xyzzyplugh"
-	sip_test.opts.SkipProviderButton = skipProvider
 	sip_test.opts.Validate()
 
 	sip_test.proxy = NewOAuthProxy(sip_test.opts, func(email string) bool {
 		return true
 	})
 	sip_test.sign_in_regexp = regexp.MustCompile(signInRedirectPattern)
-	sip_test.sign_in_provider_regexp = regexp.MustCompile(signInSkipProvider)
 
 	return &sip_test
 }
@@ -396,7 +391,7 @@ func (sip_test *SignInPageTest) GetEndpoint(endpoint string) (int, string) {
 }
 
 func TestSignInPageIncludesTargetRedirect(t *testing.T) {
-	sip_test := NewSignInPageTest(false)
+	sip_test := NewSignInPageTest()
 	const endpoint = "/some/random/endpoint"
 
 	code, body := sip_test.GetEndpoint(endpoint)
@@ -414,7 +409,7 @@ func TestSignInPageIncludesTargetRedirect(t *testing.T) {
 }
 
 func TestSignInPageDirectAccessRedirectsToRoot(t *testing.T) {
-	sip_test := NewSignInPageTest(false)
+	sip_test := NewSignInPageTest()
 	code, body := sip_test.GetEndpoint("/oauth2/sign_in")
 	assert.Equal(t, 200, code)
 
@@ -425,34 +420,6 @@ func TestSignInPageDirectAccessRedirectsToRoot(t *testing.T) {
 	}
 	if match[1] != "/" {
 		t.Fatal(`expected redirect to "/", but was "` + match[1] + `"`)
-	}
-}
-
-func TestSignInPageSkipProvider(t *testing.T) {
-	sip_test := NewSignInPageTest(true)
-	const endpoint = "/some/random/endpoint"
-
-	code, body := sip_test.GetEndpoint(endpoint)
-	assert.Equal(t, 302, code)
-
-	match := sip_test.sign_in_provider_regexp.FindStringSubmatch(body)
-	if match == nil {
-		t.Fatal("Did not find pattern in body: " +
-			signInSkipProvider + "\nBody:\n" + body)
-	}
-}
-
-func TestSignInPageSkipProviderDirect(t *testing.T) {
-	sip_test := NewSignInPageTest(true)
-	const endpoint = "/sign_in"
-
-	code, body := sip_test.GetEndpoint(endpoint)
-	assert.Equal(t, 302, code)
-
-	match := sip_test.sign_in_provider_regexp.FindStringSubmatch(body)
-	if match == nil {
-		t.Fatal("Did not find pattern in body: " +
-			signInSkipProvider + "\nBody:\n" + body)
 	}
 }
 
@@ -672,33 +639,6 @@ func TestAuthOnlyEndpointSetXAuthRequestHeaders(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, pc_test.rw.Code)
 	assert.Equal(t, "oauth_user", pc_test.rw.HeaderMap["X-Auth-Request-User"][0])
 	assert.Equal(t, "oauth_user@example.com", pc_test.rw.HeaderMap["X-Auth-Request-Email"][0])
-}
-
-func TestAuthSkippedForPreflightRequests(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write([]byte("response"))
-	}))
-	defer upstream.Close()
-
-	opts := NewOptions()
-	opts.Upstreams = append(opts.Upstreams, upstream.URL)
-	opts.ClientID = "bazquux"
-	opts.ClientSecret = "foobar"
-	opts.CookieSecret = "xyzzyplugh"
-	opts.SkipAuthPreflight = true
-	opts.Validate()
-
-	upstream_url, _ := url.Parse(upstream.URL)
-	opts.provider = NewTestProvider(upstream_url, "")
-
-	proxy := NewOAuthProxy(opts, func(string) bool { return false })
-	rw := httptest.NewRecorder()
-	req, _ := http.NewRequest("OPTIONS", "/preflight-request", nil)
-	proxy.ServeHTTP(rw, req)
-
-	assert.Equal(t, 200, rw.Code)
-	assert.Equal(t, "response", rw.Body.String())
 }
 
 type SignatureAuthenticator struct {

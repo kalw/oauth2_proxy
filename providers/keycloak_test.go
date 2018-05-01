@@ -9,8 +9,8 @@ import (
 	"github.com/bmizerany/assert"
 )
 
-func testGitLabProvider(hostname string) *GitLabProvider {
-	p := NewGitLabProvider(
+func testKeycloakProvider(hostname, group string) *KeycloakProvider {
+	p := NewKeycloakProvider(
 		&ProviderData{
 			ProviderName: "",
 			LoginURL:     &url.URL{},
@@ -18,6 +18,11 @@ func testGitLabProvider(hostname string) *GitLabProvider {
 			ProfileURL:   &url.URL{},
 			ValidateURL:  &url.URL{},
 			Scope:        ""})
+
+	if group != "" {
+		p.SetGroup(group)
+	}
+
 	if hostname != "" {
 		updateURL(p.Data().LoginURL, hostname)
 		updateURL(p.Data().RedeemURL, hostname)
@@ -27,15 +32,16 @@ func testGitLabProvider(hostname string) *GitLabProvider {
 	return p
 }
 
-func testGitLabBackend(payload string) *httptest.Server {
+func testKeycloakBackend(payload string) *httptest.Server {
 	path := "/api/v3/user"
-	query := "access_token=imaginary_access_token"
 
 	return httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			url := r.URL
-			if url.Path != path || url.RawQuery != query {
+			if url.Path != path {
 				w.WriteHeader(404)
+			} else if r.Header.Get("Authorization") != "Bearer imaginary_access_token" {
+				w.WriteHeader(403)
 			} else {
 				w.WriteHeader(200)
 				w.Write([]byte(payload))
@@ -43,21 +49,21 @@ func testGitLabBackend(payload string) *httptest.Server {
 		}))
 }
 
-func TestGitLabProviderDefaults(t *testing.T) {
-	p := testGitLabProvider("")
+func TestKeycloakProviderDefaults(t *testing.T) {
+	p := testKeycloakProvider("", "")
 	assert.NotEqual(t, nil, p)
-	assert.Equal(t, "GitLab", p.Data().ProviderName)
-	assert.Equal(t, "https://gitlab.com/oauth/authorize",
+	assert.Equal(t, "Keycloak", p.Data().ProviderName)
+	assert.Equal(t, "https://keycloak.org/oauth/authorize",
 		p.Data().LoginURL.String())
-	assert.Equal(t, "https://gitlab.com/oauth/token",
+	assert.Equal(t, "https://keycloak.org/oauth/token",
 		p.Data().RedeemURL.String())
-	assert.Equal(t, "https://gitlab.com/api/v3/user",
+	assert.Equal(t, "https://keycloak.org/api/v3/user",
 		p.Data().ValidateURL.String())
 	assert.Equal(t, "api", p.Data().Scope)
 }
 
-func TestGitLabProviderOverrides(t *testing.T) {
-	p := NewGitLabProvider(
+func TestKeycloakProviderOverrides(t *testing.T) {
+	p := NewKeycloakProvider(
 		&ProviderData{
 			LoginURL: &url.URL{
 				Scheme: "https",
@@ -73,7 +79,7 @@ func TestGitLabProviderOverrides(t *testing.T) {
 				Path:   "/api/v3/user"},
 			Scope: "profile"})
 	assert.NotEqual(t, nil, p)
-	assert.Equal(t, "GitLab", p.Data().ProviderName)
+	assert.Equal(t, "Keycloak", p.Data().ProviderName)
 	assert.Equal(t, "https://example.com/oauth/auth",
 		p.Data().LoginURL.String())
 	assert.Equal(t, "https://example.com/oauth/token",
@@ -83,12 +89,25 @@ func TestGitLabProviderOverrides(t *testing.T) {
 	assert.Equal(t, "profile", p.Data().Scope)
 }
 
-func TestGitLabProviderGetEmailAddress(t *testing.T) {
-	b := testGitLabBackend("{\"email\": \"michael.bland@gsa.gov\"}")
+func TestKeycloakProviderGetEmailAddress(t *testing.T) {
+	b := testKeycloakBackend("{\"email\": \"michael.bland@gsa.gov\"}")
 	defer b.Close()
 
 	b_url, _ := url.Parse(b.URL)
-	p := testGitLabProvider(b_url.Host)
+	p := testKeycloakProvider(b_url.Host, "")
+
+	session := &SessionState{AccessToken: "imaginary_access_token"}
+	email, err := p.GetEmailAddress(session)
+	assert.Equal(t, nil, err)
+	assert.Equal(t, "michael.bland@gsa.gov", email)
+}
+
+func TestKeycloakProviderGetEmailAddressAndGroup(t *testing.T) {
+	b := testKeycloakBackend("{\"email\": \"michael.bland@gsa.gov\", \"groups\": [\"test-grp1\", \"test-grp2\"]}")
+	defer b.Close()
+
+	b_url, _ := url.Parse(b.URL)
+	p := testKeycloakProvider(b_url.Host, "test-grp1")
 
 	session := &SessionState{AccessToken: "imaginary_access_token"}
 	email, err := p.GetEmailAddress(session)
@@ -98,12 +117,12 @@ func TestGitLabProviderGetEmailAddress(t *testing.T) {
 
 // Note that trying to trigger the "failed building request" case is not
 // practical, since the only way it can fail is if the URL fails to parse.
-func TestGitLabProviderGetEmailAddressFailedRequest(t *testing.T) {
-	b := testGitLabBackend("unused payload")
+func TestKeycloakProviderGetEmailAddressFailedRequest(t *testing.T) {
+	b := testKeycloakBackend("unused payload")
 	defer b.Close()
 
 	b_url, _ := url.Parse(b.URL)
-	p := testGitLabProvider(b_url.Host)
+	p := testKeycloakProvider(b_url.Host, "")
 
 	// We'll trigger a request failure by using an unexpected access
 	// token. Alternatively, we could allow the parsing of the payload as
@@ -114,12 +133,12 @@ func TestGitLabProviderGetEmailAddressFailedRequest(t *testing.T) {
 	assert.Equal(t, "", email)
 }
 
-func TestGitLabProviderGetEmailAddressEmailNotPresentInPayload(t *testing.T) {
-	b := testGitLabBackend("{\"foo\": \"bar\"}")
+func TestKeycloakProviderGetEmailAddressEmailNotPresentInPayload(t *testing.T) {
+	b := testKeycloakBackend("{\"foo\": \"bar\"}")
 	defer b.Close()
 
 	b_url, _ := url.Parse(b.URL)
-	p := testGitLabProvider(b_url.Host)
+	p := testKeycloakProvider(b_url.Host, "")
 
 	session := &SessionState{AccessToken: "imaginary_access_token"}
 	email, err := p.GetEmailAddress(session)

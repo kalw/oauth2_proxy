@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/18F/hmacauth"
 	"github.com/bitly/oauth2_proxy/cookie"
 	"github.com/bitly/oauth2_proxy/providers"
+	"github.com/mbland/hmacauth"
 )
 
 const SignatureHeader = "GAP-Signature"
@@ -68,6 +68,7 @@ type OAuthProxy struct {
 	PassAccessToken     bool
 	CookieCipher        *cookie.Cipher
 	skipAuthRegex       []string
+	skipAuthPreflight   bool
 	compiledRegex       []*regexp.Regexp
 	templates           *template.Template
 	Footer              string
@@ -154,16 +155,12 @@ func NewOAuthProxy(opts *Options, validator func(string) bool) *OAuthProxy {
 	redirectURL.Path = fmt.Sprintf("%s/callback", opts.ProxyPrefix)
 
 	log.Printf("OAuthProxy configured for %s Client ID: %s", opts.provider.Data().ProviderName, opts.ClientID)
-	domain := opts.CookieDomain
-	if domain == "" {
-		domain = "<default>"
-	}
 	refresh := "disabled"
 	if opts.CookieRefresh != time.Duration(0) {
 		refresh = fmt.Sprintf("after %s", opts.CookieRefresh)
 	}
 
-	log.Printf("Cookie settings: name:%s secure(https):%v httponly:%v expiry:%s domain:%s refresh:%s", opts.CookieName, opts.CookieSecure, opts.CookieHttpOnly, opts.CookieExpire, domain, refresh)
+	log.Printf("Cookie settings: name:%s secure(https):%v httponly:%v expiry:%s domain:%s refresh:%s", opts.CookieName, opts.CookieSecure, opts.CookieHttpOnly, opts.CookieExpire, opts.CookieDomain, refresh)
 
 	var cipher *cookie.Cipher
 	if opts.PassAccessToken || (opts.CookieRefresh != time.Duration(0)) {
@@ -198,6 +195,7 @@ func NewOAuthProxy(opts *Options, validator func(string) bool) *OAuthProxy {
 		serveMux:           serveMux,
 		redirectURL:        redirectURL,
 		skipAuthRegex:      opts.SkipAuthRegex,
+		skipAuthPreflight:  opts.SkipAuthPreflight,
 		compiledRegex:      opts.CompiledRegex,
 		SetXAuthRequest:    opts.SetXAuthRequest,
 		PassBasicAuth:      opts.PassBasicAuth,
@@ -246,6 +244,13 @@ func (p *OAuthProxy) redeemCode(host, code string) (s *providers.SessionState, e
 	if s.Email == "" {
 		s.Email, err = p.provider.GetEmailAddress(s)
 	}
+
+	if s.User == "" {
+		s.User, err = p.provider.GetUserName(s)
+		if err != nil && err.Error() == "not implemented" {
+			err = nil
+		}
+	}
 	return
 }
 
@@ -256,6 +261,8 @@ func (p *OAuthProxy) MakeSessionCookie(req *http.Request, value string, expirati
 			// Cookies cannot be larger than 4kb
 			log.Printf("WARNING - Cookie Size: %d bytes", len(value))
 		}
+<<<<<<< HEAD
+=======
 	}
 	return p.makeCookie(req, p.CookieName, value, expiration, now)
 }
@@ -268,19 +275,31 @@ func (p *OAuthProxy) makeCookie(req *http.Request, name string, value string, ex
 	domain := req.Host
 	if h, _, err := net.SplitHostPort(domain); err == nil {
 		domain = h
+>>>>>>> af7be2d622e2d2aecc4b7170f5e75fdff51e1ffe
 	}
+	return p.makeCookie(req, p.CookieName, value, expiration, now)
+}
+
+func (p *OAuthProxy) MakeCSRFCookie(req *http.Request, value string, expiration time.Duration, now time.Time) *http.Cookie {
+	return p.makeCookie(req, p.CSRFCookieName, value, expiration, now)
+}
+
+func (p *OAuthProxy) makeCookie(req *http.Request, name string, value string, expiration time.Duration, now time.Time) *http.Cookie {
 	if p.CookieDomain != "" {
+		domain := req.Host
+		if h, _, err := net.SplitHostPort(domain); err == nil {
+			domain = h
+		}
 		if !strings.HasSuffix(domain, p.CookieDomain) {
 			log.Printf("Warning: request host is %q but using configured cookie domain of %q", domain, p.CookieDomain)
 		}
-		domain = p.CookieDomain
 	}
 
 	return &http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     "/",
-		Domain:   domain,
+		Domain:   p.CookieDomain,
 		HttpOnly: p.CookieHttpOnly,
 		Secure:   p.CookieSecure,
 		Expires:  now.Add(expiration),
@@ -289,6 +308,26 @@ func (p *OAuthProxy) makeCookie(req *http.Request, name string, value string, ex
 
 func (p *OAuthProxy) ClearCSRFCookie(rw http.ResponseWriter, req *http.Request) {
 	http.SetCookie(rw, p.MakeCSRFCookie(req, "", time.Hour*-1, time.Now()))
+<<<<<<< HEAD
+}
+
+func (p *OAuthProxy) SetCSRFCookie(rw http.ResponseWriter, req *http.Request, val string) {
+	http.SetCookie(rw, p.MakeCSRFCookie(req, val, p.CookieExpire, time.Now()))
+}
+
+func (p *OAuthProxy) ClearSessionCookie(rw http.ResponseWriter, req *http.Request) {
+	clr := p.MakeSessionCookie(req, "", time.Hour*-1, time.Now())
+	http.SetCookie(rw, clr)
+
+	// ugly hack because default domain changed
+	if p.CookieDomain == "" {
+		clr2 := *clr
+		clr2.Domain = req.Host
+		http.SetCookie(rw, &clr2)
+	}
+}
+
+=======
 }
 
 func (p *OAuthProxy) SetCSRFCookie(rw http.ResponseWriter, req *http.Request, val string) {
@@ -299,6 +338,7 @@ func (p *OAuthProxy) ClearSessionCookie(rw http.ResponseWriter, req *http.Reques
 	http.SetCookie(rw, p.MakeSessionCookie(req, "", time.Hour*-1, time.Now()))
 }
 
+>>>>>>> af7be2d622e2d2aecc4b7170f5e75fdff51e1ffe
 func (p *OAuthProxy) SetSessionCookie(rw http.ResponseWriter, req *http.Request, val string) {
 	http.SetCookie(rw, p.MakeSessionCookie(req, val, p.CookieExpire, time.Now()))
 }
@@ -419,6 +459,14 @@ func (p *OAuthProxy) GetRedirect(req *http.Request) (redirect string, err error)
 	}
 
 	return
+<<<<<<< HEAD
+}
+
+func (p *OAuthProxy) IsWhitelistedRequest(req *http.Request) (ok bool) {
+	isPreflightRequestAllowed := p.skipAuthPreflight && req.Method == "OPTIONS"
+	return isPreflightRequestAllowed || p.IsWhitelistedPath(req.URL.Path)
+=======
+>>>>>>> af7be2d622e2d2aecc4b7170f5e75fdff51e1ffe
 }
 
 func (p *OAuthProxy) IsWhitelistedPath(path string) (ok bool) {
@@ -445,7 +493,7 @@ func (p *OAuthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		p.RobotsTxt(rw)
 	case path == p.PingPath:
 		p.PingPage(rw)
-	case p.IsWhitelistedPath(path):
+	case p.IsWhitelistedRequest(req):
 		p.serveMux.ServeHTTP(rw, req)
 	case path == p.SignInPath:
 		p.SignIn(rw, req)
@@ -475,7 +523,11 @@ func (p *OAuthProxy) SignIn(rw http.ResponseWriter, req *http.Request) {
 		p.SaveSession(rw, req, session)
 		http.Redirect(rw, req, redirect, 302)
 	} else {
-		p.SignInPage(rw, req, 200)
+		if p.SkipProviderButton {
+			p.OAuthStart(rw, req)
+		} else {
+			p.SignInPage(rw, req, http.StatusOK)
+		}
 	}
 }
 

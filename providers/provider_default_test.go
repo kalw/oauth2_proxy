@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/bmizerany/assert"
 )
 
 func TestRefresh(t *testing.T) {

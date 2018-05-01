@@ -1,9 +1,8 @@
 package main
 
 import (
+	"github.com/bmizerany/assert"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func TestTemplatesCompile(t *testing.T) {
